@@ -1,7 +1,6 @@
 'use client'
 
-import Image from 'next/image'
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 import {
   useAccount, useBalance, useChainId, useReadContract, useReadContracts,
@@ -9,40 +8,101 @@ import {
 } from 'wagmi'
 import { formatEther } from 'viem'
 import {
-  CONTRACT_ADDRESS, GRID_COLUMNS, GRID_ROWS, SLOT_PRICE_WEI,
+  CONTRACT_ADDRESS, getMegaBlock, getMintPrice, GRID_COLUMNS, GRID_ROWS,
+  isHiddenSlot, MEGA_PRICE_4W, MEGA_PRICE_6W, SLOT_PRICE_WEI,
   TOTAL_SLOTS, WALL_ABI,
 } from '@/lib/contracts'
 import { siteCopy } from '@/lib/content'
-import { createMockSlots } from '@/lib/mock-slots'
+import { createMockSlots, type Slot } from '@/lib/mock-slots'
 import { KeoneSprint } from '@/components/KeoneSprint'
 import { AmbientAudio } from '@/components/AmbientAudio'
+import Image from 'next/image'
 
-const ZERO = '0x0000000000000000000000000000000000000000'
+const ZERO     = '0x0000000000000000000000000000000000000000'
 const MONAD_ID = 10143
 const UPLOAD_PX = 160
+const CACHE_KEY = '1000nads_slots_v2'
 
 type Phase = 'gate' | 'wall' | 'form' | 'done'
 
-function short(a: string | null) {
-  if (!a) return 'available'
-  return `${a.slice(0, 6)}…${a.slice(-4)}`
+// ── localStorage helpers ─────────────────────────────────────────────────────
+
+function loadSlotCache(empty: Slot[]): Slot[] {
+  if (typeof window === 'undefined') return empty
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return empty
+    const parsed = JSON.parse(raw) as Slot[]
+    if (!Array.isArray(parsed) || parsed.length !== TOTAL_SLOTS) return empty
+    return parsed
+  } catch {
+    return empty
+  }
 }
+
+function saveSlotCache(slots: Slot[]) {
+  if (typeof window === 'undefined') return
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(slots)) } catch {}
+}
+
+// ── Note encode/decode (stores twitter as "@handle|note") ────────────────────
+
+function encodeNote(twitter: string, note: string): string {
+  const t = twitter.trim()
+  const n = note.trim()
+  if (t && n) return `@${t}|${n}`
+  if (t)      return `@${t}`
+  return n
+}
+
+function parseNote(raw: string): { twitter: string; note: string } {
+  if (raw.startsWith('@')) {
+    const pipe = raw.indexOf('|')
+    if (pipe !== -1) return { twitter: raw.slice(1, pipe), note: raw.slice(pipe + 1) }
+    return { twitter: raw.slice(1), note: '' }
+  }
+  return { twitter: '', note: raw }
+}
+
+// ── Image resize ─────────────────────────────────────────────────────────────
 
 async function resizeImage(src: string) {
   const img = await new Promise<HTMLImageElement>((res, rej) => {
     const i = new window.Image()
-    i.onload = () => res(i); i.onerror = () => rej(new Error('Load failed')); i.src = src
+    i.onload = () => res(i)
+    i.onerror = () => rej(new Error('Load failed'))
+    i.src = src
   })
   const c = document.createElement('canvas')
   c.width = UPLOAD_PX; c.height = UPLOAD_PX
   const ctx = c.getContext('2d')!
   const s = Math.max(UPLOAD_PX / img.width, UPLOAD_PX / img.height)
   const w = img.width * s; const h = img.height * s
-  ctx.fillStyle = '#140026'; ctx.fillRect(0, 0, UPLOAD_PX, UPLOAD_PX)
+  ctx.fillStyle = '#140026'
+  ctx.fillRect(0, 0, UPLOAD_PX, UPLOAD_PX)
   ctx.drawImage(img, (UPLOAD_PX - w) / 2, (UPLOAD_PX - h) / 2, w, h)
   const webp = c.toDataURL('image/webp', 0.88)
   return webp.length <= 180000 ? webp : c.toDataURL('image/jpeg', 0.86)
 }
+
+// ── TPS counter hook ─────────────────────────────────────────────────────────
+
+function useTpsCounter(active: boolean) {
+  const [tps, setTps] = useState(0)
+  useEffect(() => {
+    if (!active) { setTps(0); return }
+    let v = 0
+    const iv = setInterval(() => {
+      v = Math.min(v + Math.floor(Math.random() * 900 + 400), 9800)
+      setTps(v)
+      if (v >= 9800) clearInterval(iv)
+    }, 60)
+    return () => clearInterval(iv)
+  }, [active])
+  return tps
+}
+
+// ── useSlots hook (localStorage cache, no setState in useMemo) ───────────────
 
 function useSlots() {
   const contracts = useMemo(() =>
@@ -51,63 +111,110 @@ function useSlots() {
       address: CONTRACT_ADDRESS, abi: WALL_ABI,
       functionName: 'spotData' as const, args: [BigInt(i)] as const,
     })), [])
+
   const { data, refetch } = useReadContracts({
-    contracts, query: { enabled: contracts.length > 0, refetchInterval: 7000 },
+    contracts,
+    query: { enabled: contracts.length > 0, refetchInterval: 7000 },
   })
+
   const empty = useMemo(() => createMockSlots(TOTAL_SLOTS), [])
-  const slots = useMemo(() => {
-    if (!data || !contracts.length) return empty
+  const [cached, setCached] = useState<Slot[]>(() => loadSlotCache(empty))
+
+  const freshSlots = useMemo(() => {
+    if (!data || !contracts.length) return null
     return empty.map((fb, i) => {
       const item = data[i]
       if (!item || item.status !== 'success') return fb
-      const [owner, imageUri, note, isPermanent, mintedAt] = item.result as [string, string, string, boolean, bigint]
+      const [owner, imageUri, note, isPermanent, mintedAt] =
+        item.result as [string, string, string, boolean, bigint]
       if (owner === ZERO) return fb
       return { id: i, imageUri, owner, note, isPermanent, mintedAt: Number(mintedAt) * 1000 }
     })
   }, [contracts.length, data, empty])
-  return { slots, refetch }
+
+  useEffect(() => {
+    if (!freshSlots) return
+    saveSlotCache(freshSlots)
+    setCached(freshSlots)
+  }, [freshSlots])
+
+  return { slots: freshSlots ?? cached, refetch }
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function short(a: string | null) {
+  if (!a) return 'available'
+  return `${a.slice(0, 6)}…${a.slice(-4)}`
+}
+
+function priceLabel(slotId: number) {
+  const p = getMintPrice(slotId)
+  if (p === MEGA_PRICE_6W) return '60 MON · 6-wide premium'
+  if (p === MEGA_PRICE_4W) return '40 MON · 4-wide premium'
+  return '1 MON'
+}
+
+// ── WallBoard ────────────────────────────────────────────────────────────────
 
 export function WallBoard() {
   const { address, isConnected } = useAccount()
   const chainId = useChainId()
   const { switchChainAsync, isPending: switching } = useSwitchChain()
   const { slots, refetch } = useSlots()
-  const { data: balance } = useBalance({ address, chainId: MONAD_ID, query: { enabled: !!address } })
+
+  const { data: balance } = useBalance({
+    address, chainId: MONAD_ID,
+    query: { enabled: !!address },
+  })
+
   const { data: ownedMarker } = useReadContract({
     address: CONTRACT_ADDRESS, abi: WALL_ABI, functionName: 'walletToSlot',
     args: address ? [address] : undefined,
     query: { enabled: !!address && CONTRACT_ADDRESS !== ZERO, refetchInterval: 7000 },
   })
 
-  const [phase, setPhase] = useState<Phase>('gate')
+  const [phase, setPhase]         = useState<Phase>('gate')
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [inspectId, setInspectId] = useState<number | null>(null)
-  const [note, setNote] = useState('')
+  const [inspectId, setInspectId]   = useState<number | null>(null)
+  const [note, setNote]             = useState('')
+  const [twitter, setTwitter]       = useState('')
+  const [twitterWarn, setTwitterWarn] = useState(false)
   const [previewUri, setPreviewUri] = useState('')
-  const [imageUri, setImageUri] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [preparing, setPreparing] = useState(false)
+  const [imageUri, setImageUri]     = useState('')
+  const [error, setError]           = useState<string | null>(null)
+  const [preparing, setPreparing]   = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   const { writeContractAsync, data: hash, isPending } = useWriteContract()
   const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash })
+
+  const tpsCounter = useTpsCounter(isPending || confirming)
 
   useEffect(() => {
     if (!isSuccess) return
     setPhase('done'); setError(null); void refetch()
   }, [isSuccess, refetch])
 
-  const minted = slots.filter(s => !!s.owner).length
+  const minted    = slots.filter(s => !!s.owner).length
   const remaining = TOTAL_SLOTS - minted
-  const onChain = chainId === MONAD_ID
+  const onChain   = chainId === MONAD_ID
   const alreadyOwns = typeof ownedMarker === 'bigint' && ownedMarker > 0n
-  const hasFunds = !!balance && balance.value >= SLOT_PRICE_WEI
-  const selected = selectedId !== null ? slots[selectedId] : null
-  const inspected = inspectId !== null ? slots[inspectId] : null
+  const selected    = selectedId !== null ? slots[selectedId] : null
+  const inspected   = inspectId  !== null ? slots[inspectId]  : null
+  const mintPrice   = selectedId !== null ? getMintPrice(selectedId) : SLOT_PRICE_WEI
+  const hasFunds    = !!balance && balance.value >= mintPrice
 
-  const openForm = (id: number) => {
-    setSelectedId(id); setNote(''); setPreviewUri(''); setImageUri(''); setError(null); setPhase('form')
+  const openForm = useCallback((id: number) => {
+    setSelectedId(id); setNote(''); setTwitter(''); setTwitterWarn(false)
+    setPreviewUri(''); setImageUri(''); setError(null); setPhase('form')
+  }, [])
+
+  const handleTwitterChange = (val: string) => {
+    const isUrl = /https?:\/\/|x\.com|twitter\.com/.test(val)
+    setTwitterWarn(isUrl)
+    const clean = val.replace(/[@/\s]/g, '').slice(0, 30)
+    setTwitter(clean)
   }
 
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -118,13 +225,17 @@ export function WallBoard() {
       const raw = await new Promise<string>((res, rej) => {
         const r = new FileReader()
         r.onload = () => typeof r.result === 'string' ? res(r.result) : rej(new Error('Read error'))
-        r.onerror = () => rej(new Error('Read error')); r.readAsDataURL(file)
+        r.onerror = () => rej(new Error('Read error'))
+        r.readAsDataURL(file)
       })
       const out = await resizeImage(raw)
       if (out.length > 180000) throw new Error('Image too large after compression.')
       setPreviewUri(out); setImageUri(out)
-    } catch (err) { setError(err instanceof Error ? err.message : 'Image error.') }
-    finally { setPreparing(false) }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Image error.')
+    } finally {
+      setPreparing(false)
+    }
   }
 
   const handleMint = async () => {
@@ -137,30 +248,36 @@ export function WallBoard() {
       return
     }
     if (alreadyOwns) return setError('This wallet already owns a square.')
-    if (!hasFunds) return setError('You need at least 1 MON on Monad testnet.')
-    if (!imageUri) return setError('Upload an image first.')
-    if (note.length > 96) return setError('Note must be under 96 characters.')
+    if (!hasFunds) return setError(`You need at least ${formatEther(mintPrice)} MON on Monad testnet.`)
+    if (!imageUri)  return setError('Upload an image first.')
+    const combinedNote = encodeNote(twitter, note)
+    if (combinedNote.length > 96) return setError('Note too long (max 96 chars).')
     try {
       await writeContractAsync({
         address: CONTRACT_ADDRESS, abi: WALL_ABI, functionName: 'mintSpot',
-        args: [BigInt(selected.id), imageUri, note, true], value: SLOT_PRICE_WEI,
+        args: [BigInt(selected.id), imageUri, combinedNote, true],
+        value: mintPrice,
       })
-    } catch (err) { setError(err instanceof Error ? err.message : 'Mint failed.') }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Mint failed.')
+    }
   }
 
   const mintLabel = (() => {
     if (!isConnected) return 'Connect wallet first'
-    if (!onChain) return switching ? 'Switching...' : 'Switch to Monad Testnet'
-    if (alreadyOwns) return 'Wallet already owns a square'
-    if (!hasFunds) return 'Need 1 MON — get from faucet below'
-    if (preparing) return 'Preparing image...'
-    if (!imageUri) return 'Upload an image to continue'
-    if (isPending || confirming) return 'Confirming on Monad...'
+    if (!onChain)     return switching ? 'Switching...' : 'Switch to Monad Testnet'
+    if (alreadyOwns)  return 'Wallet already owns a square'
+    if (!hasFunds)    return `Need ${formatEther(mintPrice)} MON — get from faucet`
+    if (preparing)    return 'Preparing image...'
+    if (!imageUri)    return 'Upload an image to continue'
+    if (isPending || confirming) return `Confirming on Monad… ${tpsCounter.toLocaleString()} TPS`
     return '✦ Write my name to history'
   })()
 
   const canMint = isConnected && onChain && !alreadyOwns && hasFunds && !!imageUri &&
     !isPending && !confirming && !preparing && !selected?.owner
+
+  // ── Grid ──────────────────────────────────────────────────────────────────
 
   const GridSlots = ({ dim = false }: { dim?: boolean }) => (
     <div
@@ -168,22 +285,34 @@ export function WallBoard() {
       style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, 1fr)`, gridTemplateRows: `repeat(${GRID_ROWS}, 1fr)` }}
     >
       {slots.map(slot => {
+        if (isHiddenSlot(slot.id)) return null
+
+        const mega      = getMegaBlock(slot.id)
+        const colSpan   = mega?.colSpan ?? 1
         const isSelected = slot.id === selectedId
+        const isMega    = colSpan > 1
+
         return (
           <button
             key={slot.id}
             type="button"
-            className={`wall-slot${slot.owner ? ' wall-slot--owned' : ' wall-slot--open'}${isSelected ? ' wall-slot--active' : ''}`}
+            className={[
+              'wall-slot',
+              slot.owner ? 'wall-slot--owned' : 'wall-slot--open',
+              isSelected ? 'wall-slot--active' : '',
+              isMega     ? `wall-slot--mega wall-slot--mega-${colSpan}` : '',
+            ].filter(Boolean).join(' ')}
+            style={colSpan > 1 ? { gridColumn: `span ${colSpan}` } : undefined}
             onClick={() => {
               if (dim) return
-              if (slot.owner) { setInspectId(slot.id) }
-              else { openForm(slot.id) }
+              if (slot.owner) setInspectId(slot.id)
+              else openForm(slot.id)
             }}
-            title={slot.owner ? `Owned by ${short(slot.owner)}` : `Claim #${slot.id + 1}`}
+            title={slot.owner ? `Owned by ${short(slot.owner)}` : `Claim #${slot.id + 1}${isMega ? ` · ${priceLabel(slot.id)}` : ''}`}
           >
             {slot.imageUri
-              ? <Image src={slot.imageUri} alt="" fill sizes="40px" unoptimized style={{ objectFit: 'cover' }} />
-              : <span className="wall-slot__n">{slot.id + 1}</span>
+              ? <img src={slot.imageUri} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              : <span className="wall-slot__n">{slot.id + 1}{isMega && <span className="wall-slot__mega-tag">{colSpan}×</span>}</span>
             }
           </button>
         )
@@ -198,10 +327,10 @@ export function WallBoard() {
           <div className="wall-meta">
             <span className="stat-pill">{minted} claimed</span>
             <span className="stat-pill">{remaining} remaining</span>
-            <span className="stat-pill">{formatEther(SLOT_PRICE_WEI)} MON / spot</span>
+            <span className="stat-pill">from 1 MON / spot</span>
             {balance && <span className="stat-pill">{Number(formatEther(balance.value)).toFixed(2)} MON</span>}
           </div>
-          <p className="wall-hint">Click an open square to claim your permanent spot · Click an owned square to inspect</p>
+          <p className="wall-hint">Click an open square to claim · Click an owned square to inspect · Gold = premium</p>
         </>
       )}
       <div className="wall-frame">
@@ -239,7 +368,7 @@ export function WallBoard() {
             <div className="gate-pills">
               <span className="stat-pill">{minted} claimed</span>
               <span className="stat-pill">{remaining} remaining</span>
-              <span className="stat-pill">{formatEther(SLOT_PRICE_WEI)} MON / spot</span>
+              <span className="stat-pill">from 1 MON / spot</span>
             </div>
             <div className="game-card">
               <KeoneSprint onUnlock={() => setPhase('wall')} />
@@ -262,11 +391,17 @@ export function WallBoard() {
             <div className="claim-modal" role="dialog" aria-modal>
               <button className="modal-x" onClick={() => setPhase('wall')} aria-label="Close">✕</button>
               <div className="modal-head">
-                <span className="modal-badge">Permanent Spot</span>
+                {getMegaBlock(selected.id)
+                  ? <span className="modal-badge modal-badge--premium">
+                      {getMegaBlock(selected.id)!.colSpan === 6 ? '6-wide · 60 MON' : '4-wide · 40 MON'} · Premium
+                    </span>
+                  : <span className="modal-badge">Permanent Spot · 1 MON</span>
+                }
                 <div className="modal-num">#{selected.id + 1}</div>
-                <div className="modal-sub">Your name on Monad. Forever.</div>
+                <div className="modal-sub">Write your name to the Monad chain. <strong>Forever.</strong></div>
               </div>
               <div className="modal-body">
+
                 {/* Image upload */}
                 <div className="modal-field">
                   <label className="modal-lbl">Your Image</label>
@@ -288,11 +423,31 @@ export function WallBoard() {
                   {preparing && <p className="modal-hint-txt">Preparing image…</p>}
                 </div>
 
+                {/* Twitter */}
+                <div className="modal-field">
+                  <label className="modal-lbl">X / Twitter <span className="modal-optional">optional</span></label>
+                  <div className="twitter-input-wrap">
+                    <span className="twitter-prefix">@</span>
+                    <input
+                      className="twitter-input"
+                      value={twitter}
+                      onChange={e => handleTwitterChange(e.target.value)}
+                      placeholder="yourhandle"
+                      maxLength={32}
+                    />
+                  </div>
+                  {twitterWarn && (
+                    <div className="twitter-warn">
+                      Paste your username only, not the full URL.
+                    </div>
+                  )}
+                </div>
+
                 {/* Note */}
                 <div className="modal-field">
                   <label className="modal-lbl">
                     Your Note
-                    <span className="modal-counter">{note.length} / 96</span>
+                    <span className="modal-counter">{encodeNote(twitter, note).length} / 96</span>
                   </label>
                   <input
                     className="modal-note"
@@ -305,6 +460,14 @@ export function WallBoard() {
                     Quotes, backslashes &amp; line breaks are automatically removed
                   </div>
                 </div>
+
+                {/* TPS flash during confirmation */}
+                {(isPending || confirming) && tpsCounter > 0 && (
+                  <div className="tx-tps-flash">
+                    <span className="tps-num">{tpsCounter.toLocaleString()}</span>
+                    <span className="tps-label">TPS · Monad</span>
+                  </div>
+                )}
 
                 {error && <div className="modal-err">{error}</div>}
 
@@ -340,29 +503,35 @@ export function WallBoard() {
         </section>
       )}
 
-      {/* ── INSPECT MODAL (owned PFP) ── */}
-      {inspectId !== null && inspected && (
-        <div className="inspect-backdrop" onClick={() => setInspectId(null)}>
-          <div className="inspect-card" onClick={e => e.stopPropagation()}>
-            <button className="inspect-close" onClick={() => setInspectId(null)}>✕</button>
-            {inspected.imageUri && (
-              <img src={inspected.imageUri} alt="PFP" className="inspect-img" />
-            )}
-            <div className="inspect-body">
-              <div className="inspect-num">#{inspected.id + 1}</div>
-              <div className="inspect-owner">{short(inspected.owner)}</div>
-              {inspected.note && (
-                <div className="inspect-note">"{inspected.note}"</div>
+      {/* ── INSPECT MODAL ── */}
+      {inspectId !== null && inspected && (() => {
+        const { twitter: tw, note: nt } = parseNote(inspected.note ?? '')
+        return (
+          <div className="inspect-backdrop" onClick={() => setInspectId(null)}>
+            <div className="inspect-card" onClick={e => e.stopPropagation()}>
+              <button className="inspect-close" onClick={() => setInspectId(null)}>✕</button>
+              {inspected.imageUri && (
+                <img src={inspected.imageUri} alt="PFP" className="inspect-img" />
               )}
-              <div className="inspect-date">
-                {inspected.mintedAt
-                  ? new Date(inspected.mintedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
-                  : 'Claimed on Monad Testnet'}
+              <div className="inspect-body">
+                <div className="inspect-num">#{inspected.id + 1}</div>
+                <div className="inspect-owner">{short(inspected.owner)}</div>
+                {tw && (
+                  <a className="inspect-twitter" href={`https://x.com/${tw}`} target="_blank" rel="noopener noreferrer">
+                    @{tw}
+                  </a>
+                )}
+                {nt && <div className="inspect-note">"{nt}"</div>}
+                <div className="inspect-date">
+                  {inspected.mintedAt
+                    ? new Date(inspected.mintedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+                    : 'Claimed on Monad Testnet'}
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* ── FAUCET ── */}
       <footer className="faucet-section">

@@ -984,3 +984,137 @@ a { color: inherit; text-decoration: none; }
 }
 .builder-link:hover { border-color: var(--border2); color: var(--ink); background: rgba(255,255,255,0.08); }
 .builder-link svg { opacity: 0.7; flex-shrink: 0; }
+
+/* ── Twitter / X input ───────────────────── */
+.modal-optional {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  color: rgba(244,239,255,0.25);
+}
+
+.twitter-input-wrap {
+  display: flex;
+  align-items: center;
+  border-radius: 13px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.038);
+  overflow: hidden;
+  transition: border-color 120ms;
+}
+.twitter-input-wrap:focus-within { border-color: rgba(110,70,240,0.5); }
+
+.twitter-prefix {
+  padding: 0 10px 0 15px;
+  color: var(--ink3);
+  font-size: 14px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.twitter-input {
+  flex: 1;
+  padding: 13px 15px 13px 2px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.twitter-input::placeholder { color: var(--ink3); }
+
+.twitter-warn {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255,170,0,0.08);
+  border: 1px solid rgba(255,170,0,0.22);
+  color: rgba(255,210,100,0.85);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* ── TPS flash during confirmation ───────── */
+.tx-tps-flash {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(110,70,240,0.1);
+  border: 1px solid rgba(110,70,240,0.28);
+  animation: tps-pulse 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes tps-pulse {
+  from { border-color: rgba(110,70,240,0.28); box-shadow: none; }
+  to   { border-color: rgba(110,70,240,0.6);  box-shadow: 0 0 18px rgba(110,70,240,0.22); }
+}
+
+.tps-num {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.07em;
+  color: var(--purple2);
+}
+
+.tps-label {
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+/* ── Premium / mega badge ────────────────── */
+.modal-badge--premium {
+  border-color: rgba(255,200,0,0.45);
+  background: rgba(255,180,0,0.1);
+  color: #ffd966;
+}
+
+/* ── Mega slot styles ────────────────────── */
+.wall-slot--mega {
+  border-width: 1.5px;
+}
+
+.wall-slot--mega.wall-slot--open {
+  border-color: rgba(255,200,0,0.3);
+  background: rgba(255,170,0,0.06);
+}
+
+.wall-slot--mega.wall-slot--open:hover {
+  border-color: rgba(255,200,0,0.7);
+  background: rgba(255,170,0,0.14);
+  box-shadow: 0 0 18px rgba(255,180,0,0.28);
+  transform: scale(1.04);
+}
+
+.wall-slot--mega-6 { min-height: 0; }
+.wall-slot--mega-4 { min-height: 0; }
+
+.wall-slot__mega-tag {
+  display: block;
+  font-size: 6px;
+  color: rgba(255,200,0,0.7);
+  letter-spacing: 0.08em;
+  margin-top: 1px;
+}
+
+/* ── Inspect Twitter link ────────────────── */
+.inspect-twitter {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(140,110,255,0.28);
+  background: rgba(110,70,240,0.08);
+  color: var(--purple2);
+  font-size: 12px;
+  text-decoration: none;
+  transition: border-color 100ms, background 100ms;
+}
+.inspect-twitter:hover {
+  border-color: rgba(140,110,255,0.5);
+  background: rgba(110,70,240,0.16);
+}

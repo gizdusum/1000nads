@@ -13,7 +13,6 @@ library Base64 {
 
         assembly {
             mstore(result, encodedLen)
-
             let tablePtr := add(table, 1)
             let dataPtr := data
             let endPtr := add(dataPtr, mload(data))
@@ -23,7 +22,6 @@ library Base64 {
             {
                 dataPtr := add(dataPtr, 3)
                 let input := mload(dataPtr)
-
                 mstore8(resultPtr, mload(add(tablePtr, and(shr(18, input), 0x3F))))
                 resultPtr := add(resultPtr, 1)
                 mstore8(resultPtr, mload(add(tablePtr, and(shr(12, input), 0x3F))))
@@ -35,12 +33,8 @@ library Base64 {
             }
 
             switch mod(mload(data), 3)
-            case 1 {
-                mstore(sub(resultPtr, 2), shl(240, 0x3d3d))
-            }
-            case 2 {
-                mstore(sub(resultPtr, 1), shl(248, 0x3d))
-            }
+            case 1 { mstore(sub(resultPtr, 2), shl(240, 0x3d3d)) }
+            case 2 { mstore(sub(resultPtr, 1), shl(248, 0x3d)) }
         }
 
         return result;
@@ -48,11 +42,11 @@ library Base64 {
 }
 
 contract SpotWall {
-    uint256 public constant TOTAL_SLOTS = 1000;
-    uint256 public constant SLOT_PRICE = 1 ether;
+    uint256 public constant TOTAL_SLOTS   = 1000;
+    uint256 public constant DEFAULT_PRICE = 1 ether;
 
-    string public constant NAME = "1000nads";
-    string public constant SYMBOL = "NADS";
+    string public constant NAME        = "1000nads";
+    string public constant SYMBOL      = "NADS";
     string public constant DESCRIPTION =
         "1000nads is a finite Monad-native wall. One wallet. One slot. One permanent place on the page.";
 
@@ -60,48 +54,67 @@ contract SpotWall {
 
     struct Spot {
         address owner;
-        string imageUri;
-        string note;
-        bool isPermanent;
+        string  imageUri;
+        string  note;
+        bool    isPermanent;
         uint256 mintedAt;
     }
 
-    mapping(uint256 => Spot) public spotData;
+    mapping(uint256 => Spot)    public spotData;
     mapping(address => uint256) public walletToSlot;
+    mapping(uint256 => uint256) public premiumPrice; // 0 means use DEFAULT_PRICE
 
     event SpotMinted(uint256 indexed slotId, address indexed owner, string imageUri, string note, bool isPermanent);
+    event SlotCleared(uint256 indexed slotId);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
-    modifier onlyOwner() {
-        _onlyOwner();
-        _;
-    }
+    modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
     constructor() {
         owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
     }
 
+    function slotPrice(uint256 slotId) public view returns (uint256) {
+        uint256 p = premiumPrice[slotId];
+        return p > 0 ? p : DEFAULT_PRICE;
+    }
+
     function mintSpot(uint256 slotId, string calldata imageUri, string calldata note, bool isPermanent) external payable {
-        require(slotId < TOTAL_SLOTS, "invalid slot");
-        require(msg.value == SLOT_PRICE, "wrong price");
-        require(bytes(imageUri).length > 0, "empty uri");
-        require(bytes(imageUri).length <= 180000, "image too large");
-        require(bytes(note).length <= 96, "note too long");
-        require(_isSafeNote(note), "unsafe note");
-        require(walletToSlot[msg.sender] == 0 && !_ownsZero(msg.sender), "wallet already owns slot");
-        require(spotData[slotId].owner == address(0), "slot already claimed");
+        require(slotId < TOTAL_SLOTS,                                      "invalid slot");
+        require(msg.value == slotPrice(slotId),                            "wrong price");
+        require(bytes(imageUri).length > 0,                                "empty uri");
+        require(bytes(imageUri).length <= 180000,                          "image too large");
+        require(bytes(note).length <= 96,                                  "note too long");
+        require(_isSafeNote(note),                                         "unsafe note");
+        require(walletToSlot[msg.sender] == 0 && !_ownsZero(msg.sender),   "wallet already owns slot");
+        require(spotData[slotId].owner == address(0),                      "slot already claimed");
 
         spotData[slotId] = Spot({
-            owner: msg.sender,
-            imageUri: imageUri,
-            note: note,
+            owner:       msg.sender,
+            imageUri:    imageUri,
+            note:        note,
             isPermanent: isPermanent,
-            mintedAt: block.timestamp
+            mintedAt:    block.timestamp
         });
 
         walletToSlot[msg.sender] = slotId + 1;
         emit SpotMinted(slotId, msg.sender, imageUri, note, isPermanent);
+    }
+
+    function setPremiumPrice(uint256 slotId, uint256 price) external onlyOwner {
+        require(slotId < TOTAL_SLOTS, "invalid slot");
+        premiumPrice[slotId] = price;
+    }
+
+    function adminClearSlot(uint256 slotId) external onlyOwner {
+        require(slotId < TOTAL_SLOTS, "invalid slot");
+        address prev = spotData[slotId].owner;
+        if (prev != address(0)) {
+            walletToSlot[prev] = 0;
+        }
+        delete spotData[slotId];
+        emit SlotCleared(slotId);
     }
 
     function ownerOfSlot(uint256 slotId) external view returns (address) {
@@ -113,29 +126,16 @@ contract SpotWall {
         require(spot.owner != address(0), "spot not minted");
 
         string memory permanence = spot.isPermanent ? "fully-onchain" : "external-image";
-        string memory payload = Base64.encode(
-            bytes(
-                string(
-                    abi.encodePacked(
-                        '{"name":"1000nads Slot #',
-                        _toString(slotId + 1),
-                        '","description":"',
-                        DESCRIPTION,
-                        '","image":"',
-                        spot.imageUri,
-                        '","attributes":[{"trait_type":"slot","value":"',
-                        _toString(slotId + 1),
-                        '"},{"trait_type":"permanence","value":"',
-                        permanence,
-                        '"},{"trait_type":"owner","value":"',
-                        _toHexString(spot.owner),
-                        '"},{"trait_type":"note","value":"',
-                        spot.note,
-                        '"}]}'
-                    )
-                )
-            )
-        );
+        string memory payload = Base64.encode(bytes(string(abi.encodePacked(
+            '{"name":"1000nads Slot #', _toString(slotId + 1),
+            '","description":"', DESCRIPTION,
+            '","image":"', spot.imageUri,
+            '","attributes":[{"trait_type":"slot","value":"', _toString(slotId + 1),
+            '"},{"trait_type":"permanence","value":"', permanence,
+            '"},{"trait_type":"owner","value":"', _toHexString(spot.owner),
+            '"},{"trait_type":"note","value":"', spot.note,
+            '"}]}'
+        ))));
 
         return string(abi.encodePacked("data:application/json;base64,", payload));
     }
@@ -154,39 +154,25 @@ contract SpotWall {
         return spotData[0].owner == wallet;
     }
 
-    function _onlyOwner() internal view {
-        require(msg.sender == owner, "not owner");
-    }
-
     function _isSafeNote(string calldata note) internal pure returns (bool) {
         bytes calldata data = bytes(note);
         for (uint256 i = 0; i < data.length; i++) {
-            bytes1 char = data[i];
-            if (char == '"' || char == "\\" || uint8(char) < 0x20) {
-                return false;
-            }
+            bytes1 c = data[i];
+            if (c == '"' || c == "\\" || uint8(c) < 0x20) return false;
         }
         return true;
     }
 
     function _toString(uint256 value) internal pure returns (string memory) {
         if (value == 0) return "0";
-
-        uint256 temp = value;
-        uint256 digits;
-        while (temp != 0) {
-            digits++;
-            temp /= 10;
-        }
-
+        uint256 temp = value; uint256 digits;
+        while (temp != 0) { digits++; temp /= 10; }
         bytes memory buffer = new bytes(digits);
         while (value != 0) {
             digits -= 1;
-            // forge-lint: disable-next-line(unsafe-typecast)
             buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
             value /= 10;
         }
-
         return string(buffer);
     }
 
@@ -194,14 +180,11 @@ contract SpotWall {
         bytes20 value = bytes20(account);
         bytes16 symbols = 0x30313233343536373839616263646566;
         bytes memory buffer = new bytes(42);
-        buffer[0] = "0";
-        buffer[1] = "x";
-
+        buffer[0] = "0"; buffer[1] = "x";
         for (uint256 i = 0; i < 20; i++) {
             buffer[2 + i * 2] = bytes1(symbols[uint8(value[i] >> 4)]);
             buffer[3 + i * 2] = bytes1(symbols[uint8(value[i] & 0x0f)]);
         }
-
         return string(buffer);
     }
 }
