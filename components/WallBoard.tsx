@@ -1,9 +1,9 @@
 'use client'
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 import {
-  useAccount, useBalance, useChainId, useReadContract, useReadContracts,
+  useAccount, useBalance, useChainId, useReadContract,
   useSwitchChain, useWaitForTransactionReceipt, useWriteContract,
 } from 'wagmi'
 import { formatEther } from 'viem'
@@ -12,50 +12,49 @@ import {
   isHiddenSlot, MEGA_PRICE_4W, MEGA_PRICE_6W, SLOT_PRICE_WEI,
   TOTAL_SLOTS, WALL_ABI,
 } from '@/lib/contracts'
-import { siteCopy } from '@/lib/content'
 import { createMockSlots, type Slot } from '@/lib/mock-slots'
 import { KeoneSprint } from '@/components/KeoneSprint'
 import { AmbientAudio } from '@/components/AmbientAudio'
 import Image from 'next/image'
+import type { SlotData } from '@/app/api/slots/route'
 
-const ZERO     = '0x0000000000000000000000000000000000000000'
-const MONAD_ID = 10143
+const ZERO      = '0x0000000000000000000000000000000000000000'
+const MONAD_ID  = 10143
 const UPLOAD_PX = 160
-const CACHE_KEY = '1000nads_slots_v2'
 
 type Phase = 'gate' | 'wall' | 'form' | 'done'
 
-// ── localStorage helpers ─────────────────────────────────────────────────────
+// ── Fetch slots from server API (server handles all RPC + caching) ─────────────
 
-function loadSlotCache(empty: Slot[]): Slot[] {
-  if (typeof window === 'undefined') return empty
+async function fetchSlotsFromApi(current: Slot[], empty: Slot[]): Promise<Slot[]> {
   try {
-    const raw = localStorage.getItem(CACHE_KEY)
-    if (!raw) return empty
-    const parsed = JSON.parse(raw) as Slot[]
-    if (!Array.isArray(parsed) || parsed.length !== TOTAL_SLOTS) return empty
-    return parsed
+    const res = await fetch('/api/slots', { cache: 'no-store' })
+    if (!res.ok) return current
+    const data: SlotData[] = await res.json()
+    // Merge into current: only update slots the API has data for.
+    // Never clear a slot to null — a null API entry could be a transient RPC failure,
+    // not a confirmed empty slot.
+    const next: Slot[] = current.map(s => ({ ...s }))
+    data.forEach((d, i) => {
+      if (d) next[i] = { id: d.id, imageUri: d.imageUri, owner: d.owner, note: d.note, isPermanent: d.isPermanent, mintedAt: d.mintedAt }
+    })
+    return next
   } catch {
-    return empty
+    return current
   }
 }
 
-function saveSlotCache(slots: Slot[]) {
-  if (typeof window === 'undefined') return
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(slots)) } catch {}
-}
-
-// ── Note encode/decode (stores twitter as "@handle|note") ────────────────────
+// ── Note encode/decode ────────────────────────────────────────────────────────
 
 function encodeNote(twitter: string, note: string): string {
-  const t = twitter.trim()
-  const n = note.trim()
+  const t = twitter.trim(); const n = note.trim()
   if (t && n) return `@${t}|${n}`
   if (t)      return `@${t}`
   return n
 }
 
 function parseNote(raw: string): { twitter: string; note: string } {
+  if (!raw) return { twitter: '', note: '' }
   if (raw.startsWith('@')) {
     const pipe = raw.indexOf('|')
     if (pipe !== -1) return { twitter: raw.slice(1, pipe), note: raw.slice(pipe + 1) }
@@ -64,84 +63,67 @@ function parseNote(raw: string): { twitter: string; note: string } {
   return { twitter: '', note: raw }
 }
 
-// ── Image resize ─────────────────────────────────────────────────────────────
+// ── Image resize ──────────────────────────────────────────────────────────────
 
 async function resizeImage(src: string) {
   const img = await new Promise<HTMLImageElement>((res, rej) => {
     const i = new window.Image()
-    i.onload = () => res(i)
-    i.onerror = () => rej(new Error('Load failed'))
-    i.src = src
+    i.onload = () => res(i); i.onerror = () => rej(new Error('Load failed')); i.src = src
   })
   const c = document.createElement('canvas')
   c.width = UPLOAD_PX; c.height = UPLOAD_PX
   const ctx = c.getContext('2d')!
   const s = Math.max(UPLOAD_PX / img.width, UPLOAD_PX / img.height)
   const w = img.width * s; const h = img.height * s
-  ctx.fillStyle = '#140026'
-  ctx.fillRect(0, 0, UPLOAD_PX, UPLOAD_PX)
+  ctx.fillStyle = '#140026'; ctx.fillRect(0, 0, UPLOAD_PX, UPLOAD_PX)
   ctx.drawImage(img, (UPLOAD_PX - w) / 2, (UPLOAD_PX - h) / 2, w, h)
-  const webp = c.toDataURL('image/webp', 0.88)
-  return webp.length <= 180000 ? webp : c.toDataURL('image/jpeg', 0.86)
+  const webp = c.toDataURL('image/webp', 0.85)
+  if (webp.length <= 150000) return webp
+  const jpeg = c.toDataURL('image/jpeg', 0.80)
+  if (jpeg.length <= 150000) return jpeg
+  // aggressive compress
+  c.width = 120; c.height = 120
+  const ctx2 = c.getContext('2d')!
+  ctx2.fillStyle = '#140026'; ctx2.fillRect(0, 0, 120, 120)
+  ctx2.drawImage(img, (120 - w * 120/160) / 2, (120 - h * 120/160) / 2, w * 120/160, h * 120/160)
+  return c.toDataURL('image/jpeg', 0.70)
 }
 
-// ── TPS counter hook ─────────────────────────────────────────────────────────
-
-function useTpsCounter(active: boolean) {
-  const [tps, setTps] = useState(0)
-  useEffect(() => {
-    if (!active) { setTps(0); return }
-    let v = 0
-    const iv = setInterval(() => {
-      v = Math.min(v + Math.floor(Math.random() * 900 + 400), 9800)
-      setTps(v)
-      if (v >= 9800) clearInterval(iv)
-    }, 60)
-    return () => clearInterval(iv)
-  }, [active])
-  return tps
-}
-
-// ── useSlots hook (localStorage cache, no setState in useMemo) ───────────────
+// ── useSlots ──────────────────────────────────────────────────────────────────
 
 function useSlots() {
-  const contracts = useMemo(() =>
-    CONTRACT_ADDRESS === ZERO ? [] :
-    Array.from({ length: TOTAL_SLOTS }, (_, i) => ({
-      address: CONTRACT_ADDRESS, abi: WALL_ABI,
-      functionName: 'spotData' as const, args: [BigInt(i)] as const,
-    })), [])
-
-  const { data, refetch } = useReadContracts({
-    contracts,
-    query: { enabled: contracts.length > 0, refetchInterval: 7000 },
-  })
-
   const empty = useMemo(() => createMockSlots(TOTAL_SLOTS), [])
-  const [cached, setCached] = useState<Slot[]>(() => loadSlotCache(empty))
+  const [slots, setSlots]         = useState<Slot[]>(empty)
+  const slotsRef                  = useRef<Slot[]>(empty)
+  const [txPending, setTxPending] = useState(false)
 
-  const freshSlots = useMemo(() => {
-    if (!data || !contracts.length) return null
-    return empty.map((fb, i) => {
-      const item = data[i]
-      if (!item || item.status !== 'success') return fb
-      const [owner, imageUri, note, isPermanent, mintedAt] =
-        item.result as [string, string, string, boolean, bigint]
-      if (owner === ZERO) return fb
-      return { id: i, imageUri, owner, note, isPermanent, mintedAt: Number(mintedAt) * 1000 }
-    })
-  }, [contracts.length, data, empty])
+  const fetchSlots = useCallback(async () => {
+    const next = await fetchSlotsFromApi(slotsRef.current, empty)
+    slotsRef.current = next
+    setSlots(next)
+  }, [empty])
+
+  useEffect(() => { void fetchSlots() }, [fetchSlots])
 
   useEffect(() => {
-    if (!freshSlots) return
-    saveSlotCache(freshSlots)
-    setCached(freshSlots)
-  }, [freshSlots])
+    if (txPending) return
+    const iv = setInterval(() => void fetchSlots(), 12000)
+    return () => clearInterval(iv)
+  }, [fetchSlots, txPending])
 
-  return { slots: freshSlots ?? cached, refetch }
+  const updateSlot = useCallback((slot: Slot) => {
+    setSlots(prev => {
+      const next = [...prev]
+      next[slot.id] = slot
+      slotsRef.current = next
+      return next
+    })
+  }, [])
+
+  return { slots, refetch: fetchSlots, updateSlot, setTxPending }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function short(a: string | null) {
   if (!a) return 'available'
@@ -150,31 +132,34 @@ function short(a: string | null) {
 
 function priceLabel(slotId: number) {
   const p = getMintPrice(slotId)
-  if (p === MEGA_PRICE_6W) return '60 MON · 6-wide premium'
-  if (p === MEGA_PRICE_4W) return '40 MON · 4-wide premium'
+  const mb = getMegaBlock(slotId)
+  if (mb?.colSpan === 8) return `${mb.colSpan}-wide · 60 MON`
+  if (p === MEGA_PRICE_6W) return '6-wide · 60 MON'
+  if (p === MEGA_PRICE_4W) return '4-wide · 40 MON'
   return '1 MON'
 }
 
-// ── WallBoard ────────────────────────────────────────────────────────────────
+// ── WallBoard ─────────────────────────────────────────────────────────────────
 
 export function WallBoard() {
   const { address, isConnected } = useAccount()
   const chainId = useChainId()
   const { switchChainAsync, isPending: switching } = useSwitchChain()
-  const { slots, refetch } = useSlots()
+  const { slots, refetch, updateSlot, setTxPending } = useSlots()
 
   const { data: balance } = useBalance({
     address, chainId: MONAD_ID,
-    query: { enabled: !!address },
+    query: { enabled: !!address, staleTime: 15000 },
   })
 
   const { data: ownedMarker } = useReadContract({
     address: CONTRACT_ADDRESS, abi: WALL_ABI, functionName: 'walletToSlot',
     args: address ? [address] : undefined,
-    query: { enabled: !!address && CONTRACT_ADDRESS !== ZERO, refetchInterval: 7000 },
+    query: { enabled: !!address && CONTRACT_ADDRESS !== ZERO, refetchInterval: 8000 },
   })
 
-  const [phase, setPhase]         = useState<Phase>('gate')
+  const [phase, setPhase]           = useState<Phase>('gate')
+  const [gameUnlocked, setGameUnlocked] = useState(false)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [inspectId, setInspectId]   = useState<number | null>(null)
   const [note, setNote]             = useState('')
@@ -189,12 +174,35 @@ export function WallBoard() {
   const { writeContractAsync, data: hash, isPending } = useWriteContract()
   const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash })
 
-  const tpsCounter = useTpsCounter(isPending || confirming)
-
+  // Auto-switch to Monad Testnet when wallet connects
   useEffect(() => {
-    if (!isSuccess) return
-    setPhase('done'); setError(null); void refetch()
-  }, [isSuccess, refetch])
+    if (isConnected && chainId !== MONAD_ID) {
+      switchChainAsync({ chainId: MONAD_ID }).catch(() => {})
+    }
+  }, [isConnected, chainId, switchChainAsync])
+
+  // Pause slot polling during tx flight
+  useEffect(() => {
+    setTxPending(isPending || confirming)
+  }, [isPending, confirming, setTxPending])
+
+  // After confirmed: immediately update cache + show done
+  useEffect(() => {
+    if (!isSuccess || selectedId === null || !address || !imageUri) return
+    const combinedNote = encodeNote(twitter, note)
+    updateSlot({
+      id: selectedId,
+      imageUri,
+      owner: address,
+      note: combinedNote,
+      isPermanent: true,
+      mintedAt: Date.now(),
+    })
+    setPhase('done')
+    setError(null)
+    setTimeout(() => void refetch(), 5000) // delayed background refresh
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSuccess])
 
   const minted    = slots.filter(s => !!s.owner).length
   const remaining = TOTAL_SLOTS - minted
@@ -206,30 +214,29 @@ export function WallBoard() {
   const hasFunds    = !!balance && balance.value >= mintPrice
 
   const openForm = useCallback((id: number) => {
+    if (!gameUnlocked) { setPhase('gate'); return }
     setSelectedId(id); setNote(''); setTwitter(''); setTwitterWarn(false)
     setPreviewUri(''); setImageUri(''); setError(null); setPhase('form')
-  }, [])
+  }, [gameUnlocked])
 
   const handleTwitterChange = (val: string) => {
-    const isUrl = /https?:\/\/|x\.com|twitter\.com/.test(val)
-    setTwitterWarn(isUrl)
-    const clean = val.replace(/[@/\s]/g, '').slice(0, 30)
-    setTwitter(clean)
+    setTwitterWarn(/https?:\/\/|x\.com|twitter\.com/.test(val))
+    setTwitter(val.replace(/[@/\s]/g, '').slice(0, 30))
   }
 
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
     setError(null); setPreparing(true)
     try {
-      if (file.size > 3_000_000) throw new Error('Image must be under 3 MB.')
+      if (file.size > 5_000_000) throw new Error('Image must be under 5 MB.')
       const raw = await new Promise<string>((res, rej) => {
         const r = new FileReader()
-        r.onload = () => typeof r.result === 'string' ? res(r.result) : rej(new Error('Read error'))
+        r.onload = () => typeof r.result === 'string' ? res(r.result) : rej(new Error())
         r.onerror = () => rej(new Error('Read error'))
         r.readAsDataURL(file)
       })
       const out = await resizeImage(raw)
-      if (out.length > 180000) throw new Error('Image too large after compression.')
+      if (out.length > 150000) throw new Error('Image too large after compression. Try a smaller file.')
       setPreviewUri(out); setImageUri(out)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Image error.')
@@ -248,10 +255,10 @@ export function WallBoard() {
       return
     }
     if (alreadyOwns) return setError('This wallet already owns a square.')
-    if (!hasFunds) return setError(`You need at least ${formatEther(mintPrice)} MON on Monad testnet.`)
+    if (!hasFunds) return setError(`You need at least ${formatEther(mintPrice)} MON.`)
     if (!imageUri)  return setError('Upload an image first.')
     const combinedNote = encodeNote(twitter, note)
-    if (combinedNote.length > 96) return setError('Note too long (max 96 chars).')
+    if (combinedNote.length > 96) return setError('Note too long (max 96 chars combined).')
     try {
       await writeContractAsync({
         address: CONTRACT_ADDRESS, abi: WALL_ABI, functionName: 'mintSpot',
@@ -259,7 +266,22 @@ export function WallBoard() {
         value: mintPrice,
       })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Mint failed.')
+      const raw = err instanceof Error ? err.message : 'Mint failed.'
+      if (raw.includes('wallet already owns slot')) {
+        setError('This wallet already owns a square. One slot per wallet — forever.')
+      } else if (raw.includes('slot already claimed')) {
+        setError('Slot just claimed by someone else. Pick a different square.')
+      } else if (raw.includes('wrong price')) {
+        setError('Price mismatch. Please refresh the page and try again.')
+      } else if (raw.includes('unsafe note')) {
+        setError('Note contains invalid characters. Remove quotes, backslashes, or special symbols.')
+      } else if (raw.includes('insufficient') || raw.includes('Insufficient')) {
+        setError('Insufficient MON. You need at least 1.1 MON (1 MON + gas) to mint.')
+      } else if (raw.includes('rate limit') || raw.includes('limit exceeded')) {
+        setError('Monad RPC is busy. Wait 10 seconds and try again.')
+      } else {
+        setError(raw.slice(0, 160))
+      }
     }
   }
 
@@ -267,10 +289,11 @@ export function WallBoard() {
     if (!isConnected) return 'Connect wallet first'
     if (!onChain)     return switching ? 'Switching...' : 'Switch to Monad Testnet'
     if (alreadyOwns)  return 'Wallet already owns a square'
-    if (!hasFunds)    return `Need ${formatEther(mintPrice)} MON — get from faucet`
+    if (!hasFunds)    return `Need ${formatEther(mintPrice)} MON — Get TestMON above`
     if (preparing)    return 'Preparing image...'
     if (!imageUri)    return 'Upload an image to continue'
-    if (isPending || confirming) return `Confirming on Monad… ${tpsCounter.toLocaleString()} TPS`
+    if (isPending)    return 'Approve in wallet...'
+    if (confirming)   return 'Writing to Monad chain...'
     return '✦ Write my name to history'
   })()
 
@@ -286,11 +309,16 @@ export function WallBoard() {
     >
       {slots.map(slot => {
         if (isHiddenSlot(slot.id)) return null
-
-        const mega      = getMegaBlock(slot.id)
-        const colSpan   = mega?.colSpan ?? 1
+        const mega    = getMegaBlock(slot.id)
+        const colSpan = mega?.colSpan ?? 1
+        const rowSpan = mega?.rowSpan ?? 1
         const isSelected = slot.id === selectedId
-        const isMega    = colSpan > 1
+        const isMega  = colSpan > 1
+        const isAnago = slot.id === 142
+
+        const spanStyle: React.CSSProperties = {}
+        if (colSpan > 1) spanStyle.gridColumn = `span ${colSpan}`
+        if (rowSpan > 1) spanStyle.gridRow    = `span ${rowSpan}`
 
         return (
           <button
@@ -298,21 +326,30 @@ export function WallBoard() {
             type="button"
             className={[
               'wall-slot',
-              slot.owner ? 'wall-slot--owned' : 'wall-slot--open',
-              isSelected ? 'wall-slot--active' : '',
-              isMega     ? `wall-slot--mega wall-slot--mega-${colSpan}` : '',
+              slot.owner || isAnago ? 'wall-slot--owned' : 'wall-slot--open',
+              isSelected  ? 'wall-slot--active' : '',
+              isMega      ? `wall-slot--mega wall-slot--mega-${colSpan}` : '',
             ].filter(Boolean).join(' ')}
-            style={colSpan > 1 ? { gridColumn: `span ${colSpan}` } : undefined}
+            style={Object.keys(spanStyle).length ? spanStyle : undefined}
             onClick={() => {
               if (dim) return
+              if (isAnago) { setInspectId(142); return }
               if (slot.owner) setInspectId(slot.id)
               else openForm(slot.id)
             }}
-            title={slot.owner ? `Owned by ${short(slot.owner)}` : `Claim #${slot.id + 1}${isMega ? ` · ${priceLabel(slot.id)}` : ''}`}
+            title={isAnago ? 'Anago · Keone\'s dog · Reserved forever' : slot.owner
+              ? `Owned by ${short(slot.owner)}`
+              : gameUnlocked
+                ? `Claim #${slot.id + 1}${isMega ? ` · ${priceLabel(slot.id)}` : ''}`
+                : `#${slot.id + 1} · Beat the game to claim`
+            }
           >
-            {slot.imageUri
-              ? <img src={slot.imageUri} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-              : <span className="wall-slot__n">{slot.id + 1}{isMega && <span className="wall-slot__mega-tag">{colSpan}×</span>}</span>
+            {(isAnago || slot.imageUri)
+              ? <img src={isAnago ? '/143.png' : (slot.imageUri ?? '')} alt="" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
+              : <span className="wall-slot__n">
+                  {slot.id + 1}
+                  {isMega && <span className="wall-slot__mega-tag">{colSpan}×</span>}
+                </span>
             }
           </button>
         )
@@ -330,7 +367,11 @@ export function WallBoard() {
             <span className="stat-pill">from 1 MON / spot</span>
             {balance && <span className="stat-pill">{Number(formatEther(balance.value)).toFixed(2)} MON</span>}
           </div>
-          <p className="wall-hint">Click an open square to claim · Click an owned square to inspect · Gold = premium</p>
+          <p className="wall-hint">
+            {gameUnlocked
+              ? 'Click an open square to claim · Click an owned square to inspect · Gold border = premium block'
+              : '👁 Browse mode — beat the game to unlock minting · Click an owned square to inspect'}
+          </p>
         </>
       )}
       <div className="wall-frame">
@@ -348,11 +389,16 @@ export function WallBoard() {
       <header className="site-header">
         <div className="site-header__inner">
           <div>
-            <div className="site-logo">1000nads</div>
-            <div className="site-tag">{siteCopy.tagline}</div>
+            <div className="site-logo">
+              <span className="logo-num">1000</span>nads.xyz
+            </div>
+            <div className="site-tag">Be immortal on Monad. Forever.</div>
           </div>
           <div className="header-right">
             <AmbientAudio />
+            <a className="header-faucet-btn" href="https://buildanything.so/faucet" target="_blank" rel="noopener noreferrer">
+              Get TestMON
+            </a>
             <ConnectButton />
           </div>
         </div>
@@ -371,10 +417,10 @@ export function WallBoard() {
               <span className="stat-pill">from 1 MON / spot</span>
             </div>
             <div className="game-card">
-              <KeoneSprint onUnlock={() => setPhase('wall')} />
+              <KeoneSprint onUnlock={() => { setGameUnlocked(true); setPhase('wall') }} />
             </div>
             <button className="skip-btn" onClick={() => setPhase('wall')}>
-              Skip &rarr; Go to map
+              Skip → Browse wall (read-only)
             </button>
           </div>
         </section>
@@ -393,7 +439,7 @@ export function WallBoard() {
               <div className="modal-head">
                 {getMegaBlock(selected.id)
                   ? <span className="modal-badge modal-badge--premium">
-                      {getMegaBlock(selected.id)!.colSpan === 6 ? '6-wide · 60 MON' : '4-wide · 40 MON'} · Premium
+                      {getMegaBlock(selected.id)!.colSpan}-wide · {formatEther(mintPrice)} MON · Premium
                     </span>
                   : <span className="modal-badge">Permanent Spot · 1 MON</span>
                 }
@@ -402,7 +448,7 @@ export function WallBoard() {
               </div>
               <div className="modal-body">
 
-                {/* Image upload */}
+                {/* Image */}
                 <div className="modal-field">
                   <label className="modal-lbl">Your Image</label>
                   <div className="upload-zone" onClick={() => fileRef.current?.click()}>
@@ -415,7 +461,7 @@ export function WallBoard() {
                       <div className="upload-empty">
                         <div className="upload-arrow">↑</div>
                         <div>Click to upload</div>
-                        <div className="upload-fmt">JPG · PNG · WebP · max 3 MB</div>
+                        <div className="upload-fmt">JPG · PNG · WebP · max 5 MB</div>
                       </div>
                     )}
                   </div>
@@ -437,9 +483,7 @@ export function WallBoard() {
                     />
                   </div>
                   {twitterWarn && (
-                    <div className="twitter-warn">
-                      Paste your username only, not the full URL.
-                    </div>
+                    <div className="twitter-warn">Paste your username only, not the full URL.</div>
                   )}
                 </div>
 
@@ -452,22 +496,15 @@ export function WallBoard() {
                   <input
                     className="modal-note"
                     value={note}
-                    onChange={e => setNote(e.target.value.replace(/["\\\n\r\t]/g, ' ').slice(0, 96))}
+                    onChange={e => setNote(e.target.value.replace(/["\\\x00-\x1f]/g, ' ').slice(0, 96))}
                     placeholder="Leave your mark on the Monad wall…"
                   />
                   <div className="punct-hint">
                     <span className="punct-icon">ⓘ</span>
-                    Quotes, backslashes &amp; line breaks are automatically removed
+                    Quotes, backslashes &amp; line breaks are auto-removed
                   </div>
                 </div>
 
-                {/* TPS flash during confirmation */}
-                {(isPending || confirming) && tpsCounter > 0 && (
-                  <div className="tx-tps-flash">
-                    <span className="tps-num">{tpsCounter.toLocaleString()}</span>
-                    <span className="tps-label">TPS · Monad</span>
-                  </div>
-                )}
 
                 {error && <div className="modal-err">{error}</div>}
 
@@ -492,7 +529,9 @@ export function WallBoard() {
           <div className="done-card">
             <div className="done-check">✦</div>
             <h2 className="done-title">Your spot is secured forever.</h2>
-            <p className="done-sub">Square #{selectedId !== null ? selectedId + 1 : ''} on the Monad wall — permanently yours.</p>
+            <p className="done-sub">
+              Square #{selectedId !== null ? selectedId + 1 : ''} on the Monad wall — permanently yours.
+            </p>
             {hash && (
               <a className="done-tx-link" href={`https://testnet.monadexplorer.com/tx/${hash}`} target="_blank" rel="noopener noreferrer">
                 View on Monad Explorer →
@@ -503,8 +542,27 @@ export function WallBoard() {
         </section>
       )}
 
-      {/* ── INSPECT MODAL ── */}
+      {/* ── INSPECT ── */}
       {inspectId !== null && inspected && (() => {
+        if (inspectId === 142) return (
+          <div className="inspect-backdrop" onClick={() => setInspectId(null)}>
+            <div className="inspect-card" onClick={e => e.stopPropagation()}>
+              <button className="inspect-close" onClick={() => setInspectId(null)}>✕</button>
+              <img src="/143.png" alt="Anago" className="inspect-img" style={{ objectFit: 'cover' }} />
+              <div className="inspect-body">
+                <div className="inspect-num">Anago 🐕</div>
+                <div className="inspect-note">"We love you, Anago. Keone's loyal companion — forever immortalized on Monad."</div>
+                <div className="inspect-date" style={{ marginTop: 8 }}>
+                  Reserved · Cannot be claimed · Lives here forever
+                </div>
+                <a className="inspect-twitter" href="https://x.com/keoneHD" target="_blank" rel="noopener noreferrer" style={{ marginTop: 10 }}>
+                  @keoneHD
+                </a>
+              </div>
+            </div>
+          </div>
+        )
+
         const { twitter: tw, note: nt } = parseNote(inspected.note ?? '')
         return (
           <div className="inspect-backdrop" onClick={() => setInspectId(null)}>
@@ -533,30 +591,80 @@ export function WallBoard() {
         )
       })()}
 
-      {/* ── FAUCET ── */}
-      <footer className="faucet-section">
-        <div className="faucet-inner">
-          <div className="faucet-label">Faucet</div>
-          <h3 className="faucet-title">Need testnet MON?</h3>
-          <p className="faucet-desc">Get free MON tokens from the official Monad faucet. One spot costs 1 MON.</p>
-          <a className="faucet-cta" href="https://buildanything.so/faucet" target="_blank" rel="noopener noreferrer">
-            Request faucet MON →
+      {/* ── GHOST TPS OVERLAY ── */}
+      {(isPending || confirming) && (
+        <div className="ghost-tps-overlay">
+          <GhostTpsCounter />
+        </div>
+      )}
+
+      {/* ── FOOTER ── */}
+      <footer className="site-footer">
+        <p className="footer-inspire">
+          Inspired by{' '}
+          <a href="https://www.milliondollarhomepage.com" target="_blank" rel="noopener noreferrer">milliondollarhomepage.com</a>
+          {' '}· Built with{' '}
+          <a href="https://x.com/buildanythingso" target="_blank" rel="noopener noreferrer">Build Anything</a>
+          {' '}education
+        </p>
+        <div className="footer-links">
+          <a href="https://x.com/gizdusumandnode" target="_blank" rel="noopener noreferrer">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.74l7.73-8.835L1.254 2.25H8.08l4.253 5.622zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            @gizdusumandnode
           </a>
-          <div className="builder-section">
-            <span className="builder-label">Built by</span>
-            <div className="builder-links">
-              <a className="builder-link" href="https://x.com/gizdusumandnode" target="_blank" rel="noopener noreferrer">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.74l7.73-8.835L1.254 2.25H8.08l4.253 5.622zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-                @gizdusumandnode
-              </a>
-              <a className="builder-link" href="https://github.com/gizdusum" target="_blank" rel="noopener noreferrer">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
-                gizdusum
-              </a>
-            </div>
-          </div>
+          <a href="https://github.com/gizdusum" target="_blank" rel="noopener noreferrer">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+            gizdusum
+          </a>
         </div>
       </footer>
+    </div>
+  )
+}
+
+// ── Ghost TPS Counter (floating overlay) ─────────────────────────────────────
+
+function GhostTpsCounter() {
+  const baseRef = useRef(9200 + Math.floor(Math.random() * 400))
+  const [tps, setTps] = useState(baseRef.current)
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef(Date.now())
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
+      setTps(() => {
+        // Gradually climb toward 10500, with realistic noise
+        if (baseRef.current < 10500) baseRef.current += Math.floor(Math.random() * 60 + 10)
+        const noise = Math.floor(Math.random() * 280 - 140)
+        return Math.max(9000, baseRef.current + noise)
+      })
+    }, 600)
+    return () => clearInterval(iv)
+  }, [])
+
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const mins = Math.floor(elapsed / 60)
+  const secs = elapsed % 60
+  const progress = Math.min(tps / 10500, 1)
+
+  return (
+    <div className="ghost-tps-card">
+      <div className="ghost-tps-pulse" />
+      <div className="ghost-tps-top">
+        <span className="ghost-tps-chain">Monad Testnet</span>
+        <span className="ghost-tps-dot" />
+        <span className="ghost-tps-live">LIVE</span>
+      </div>
+      <div className="ghost-tps-number">{tps.toLocaleString()}</div>
+      <div className="ghost-tps-unit">transactions / second</div>
+      <div className="ghost-tps-bar">
+        <div className="ghost-tps-fill" style={{ width: `${progress * 100}%` }} />
+      </div>
+      <div className="ghost-tps-footer">
+        <span className="ghost-tps-timer">{pad(mins)}:{pad(secs)}</span>
+        <span className="ghost-tps-status">onchain · awaiting confirmation</span>
+      </div>
     </div>
   )
 }
