@@ -107,7 +107,7 @@ function useSlots() {
 
   useEffect(() => {
     if (txPending) return
-    const iv = setInterval(() => void fetchSlots(), 12000)
+    const iv = setInterval(() => void fetchSlots(), 6000)
     return () => clearInterval(iv)
   }, [fetchSlots, txPending])
 
