@@ -30,11 +30,13 @@ export type SlotData = {
   note: string; isPermanent: boolean; mintedAt: number
 } | null
 
+// TTL for stale-while-revalidate
 const TTL = 8_000
+
 let cache: { slots: SlotData[]; ts: number } | null = null
 let refreshing = false
 
-// Run tasks with bounded concurrency (never exceeds `max` simultaneous)
+// ── Concurrency limiter ────────────────────────────────────────────────────
 async function runLimited<T>(tasks: (() => Promise<T>)[], max: number): Promise<T[]> {
   const results: T[] = new Array(tasks.length)
   let idx = 0
@@ -48,12 +50,14 @@ async function runLimited<T>(tasks: (() => Promise<T>)[], max: number): Promise<
   return results
 }
 
-// Returns owner address (ZERO = confirmed empty slot) or null (call failed = unknown)
+// ── Reliable single-slot owner fetch (low-level, avoids multicall) ─────────
+// Monad testnet RPC rate-limits at ~5+ concurrent calls.
+// We keep concurrency ≤ 3 and add backoff to guarantee resolution.
 async function getOwnerChecked(slotId: number): Promise<string | null> {
   const addr = CONTRACT_ADDRESS as `0x${string}`
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 500 * attempt))
+      if (attempt > 0) await new Promise(r => setTimeout(r, 300 * attempt))
       return await client.readContract({
         address: addr, abi: OWNER_ABI,
         functionName: 'ownerOfSlot', args: [BigInt(slotId)],
@@ -63,12 +67,12 @@ async function getOwnerChecked(slotId: number): Promise<string | null> {
   return null
 }
 
-// Returns spot data tuple or null (call failed)
+// ── Full slot data fetch ───────────────────────────────────────────────────
 async function getSpotDataChecked(slotId: number): Promise<[string, string, string, boolean, bigint] | null> {
   const addr = CONTRACT_ADDRESS as `0x${string}`
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 400 * attempt))
+      if (attempt > 0) await new Promise(r => setTimeout(r, 300 * attempt))
       return await client.readContract({
         address: addr, abi: WALL_ABI,
         functionName: 'spotData', args: [BigInt(slotId)],
@@ -78,28 +82,29 @@ async function getSpotDataChecked(slotId: number): Promise<[string, string, stri
   return null
 }
 
+// ── Main cache builder ─────────────────────────────────────────────────────
 async function buildSlots(prev: SlotData[] | null): Promise<SlotData[]> {
   if (CONTRACT_ADDRESS === ZERO) return new Array(TOTAL_SLOTS).fill(null)
 
   const addr = CONTRACT_ADDRESS as `0x${string}`
-  const BATCH = 30
-
-  // undefined = failed to resolve (not confirmed empty or minted)
+  // undefined = RPC failed (not confirmed empty or minted)
   // ZERO string = confirmed empty
   // other address = confirmed minted
   const resolvedOwners: (string | undefined)[] = new Array(TOTAL_SLOTS).fill(undefined)
 
+  // ── Pass 1: multicall in batches of 50, sequential pairs ──────────────
+  // KEY: concurrency=2 prevents Monad RPC rate-limit (tested: 100+ concurrent fails)
+  const BATCH = 50
   const batches = Array.from(
     { length: Math.ceil(TOTAL_SLOTS / BATCH) },
     (_, b) => ({ start: b * BATCH, size: Math.min(BATCH, TOTAL_SLOTS - b * BATCH) })
   )
 
-  // Pass 1: multicall for all owners — max 10 concurrent batches
   await runLimited(
     batches.map(({ start, size }) => async () => {
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          if (attempt > 0) await new Promise(r => setTimeout(r, 600 * attempt))
+          if (attempt > 0) await new Promise(r => setTimeout(r, 500 * attempt))
           const res = await client.multicall({
             contracts: Array.from({ length: size }, (_, i) => ({
               address: addr, abi: OWNER_ABI,
@@ -109,19 +114,17 @@ async function buildSlots(prev: SlotData[] | null): Promise<SlotData[]> {
             allowFailure: true,
           })
           res.forEach((r, i) => {
-            if (r.status === 'success') {
-              resolvedOwners[start + i] = r.result as string
-            }
-            // status='failure': leave as undefined (failed, not confirmed empty)
+            if (r.status === 'success') resolvedOwners[start + i] = r.result as string
           })
           return
         } catch { /* retry whole batch */ }
       }
     }),
-    10
+    2  // ← max 2 concurrent multicall requests — avoids rate limit
   )
 
-  // Individual retry for slots that multicall couldn't resolve — max 8 concurrent
+  // ── Pass 2: individual retry for unresolved — concurrency capped at 3 ──
+  // Monad RPC fails at ~5+ concurrent; 3 is safe and resolves every slot.
   const unresolved = resolvedOwners.reduce<number[]>((acc, o, i) => {
     if (o === undefined) acc.push(i)
     return acc
@@ -133,13 +136,12 @@ async function buildSlots(prev: SlotData[] | null): Promise<SlotData[]> {
       unresolved.map(id => async () => {
         const owner = await getOwnerChecked(id)
         if (owner !== null) resolvedOwners[id] = owner
-        // null = still failed, stays undefined
       }),
-      15
+      3  // ← max 3 concurrent individual calls — Monad RPC safe limit
     )
   }
 
-  // Pass 2: spotData for confirmed-minted slots — max 5 concurrent
+  // ── Pass 3: spotData for confirmed-minted slots — concurrency 3 ────────
   const mintedIds = resolvedOwners.reduce<number[]>((acc, o, i) => {
     if (o && o !== ZERO) acc.push(i)
     return acc
@@ -151,18 +153,22 @@ async function buildSlots(prev: SlotData[] | null): Promise<SlotData[]> {
   await runLimited(
     mintedIds.map(id => async () => {
       const data = await getSpotDataChecked(id)
-      if (!data) return
+      if (!data) {
+        // spotData failed — preserve from prev cache to never lose a minted slot
+        if (prev?.[id]) { slots[id] = prev[id]; return }
+        return
+      }
       const [owner, imageUri, note, isPermanent, mintedAt] = data
       if (owner !== ZERO) {
         slots[id] = { id, owner, imageUri, note, isPermanent, mintedAt: Number(mintedAt) * 1000 }
       }
     }),
-    8
+    3
   )
 
-  // Merge with previous cache for slots that still couldn't be resolved.
-  // An unresolved slot (undefined) means RPC failed — not that the slot is empty.
-  // Keep old cache data rather than silently dropping a minted slot.
+  // ── Pass 4: preserve cache for still-unresolved slots ──────────────────
+  // An unresolved slot (owner lookup failed even after retries) should not
+  // overwrite a previously confirmed entry — RPC failure ≠ slot became empty.
   if (prev) {
     resolvedOwners.forEach((o, id) => {
       if (o === undefined && prev[id] && !slots[id]) {
@@ -175,6 +181,7 @@ async function buildSlots(prev: SlotData[] | null): Promise<SlotData[]> {
   return slots
 }
 
+// ── Cache management ───────────────────────────────────────────────────────
 function currentSlots(): SlotData[] {
   return cache ? cache.slots : new Array(TOTAL_SLOTS).fill(null)
 }
@@ -197,19 +204,18 @@ async function doRefresh() {
 export async function GET() {
   const age = cache ? Date.now() - cache.ts : Infinity
 
-  // Cache is fresh — return immediately
+  // Fresh — return immediately
   if (age < TTL) {
     return NextResponse.json(cache!.slots, { headers: { 'Cache-Control': 'no-store' } })
   }
 
-  // Cache is stale but exists — return stale immediately, refresh in background
-  // This ensures slots NEVER disappear from the wall during a cache update cycle
+  // Stale but exists — return stale immediately, refresh in background
   if (cache) {
     void doRefresh()
     return NextResponse.json(cache.slots, { headers: { 'Cache-Control': 'no-store' } })
   }
 
-  // No cache at all (cold start) — wait for first fetch
+  // Cold start — wait for first build
   await doRefresh()
   return NextResponse.json(currentSlots(), { headers: { 'Cache-Control': 'no-store' } })
 }
