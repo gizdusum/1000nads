@@ -202,11 +202,11 @@ Set `NEXT_PUBLIC_CONTRACT_ADDRESS` to `0x000000000000000000000000000000000000000
 
 ## The Vision
 
-Monad is not just a faster EVM. It is a rethinking of what a blockchain can be — parallel execution, pipelined consensus, 10,000+ TPS with full EVM compatibility. When Monad launches on mainnet, it will attract a wave of new users, new builders, and new capital. The people who were here before that wave — the Nads — will have a permanent record of their presence.
+Monad is not just a faster EVM. It is a rethinking of what a blockchain can be — parallel execution, pipelined consensus, 10,000+ TPS with full EVM compatibility. Monad mainnet is live. The ecosystem is growing. The builders are already here.
 
-1000nads is that record.
+1000nads is built on Monad Testnet — a permanent record of the people who showed up before the crowd.
 
-The wall has 1,000 slots. Monad mainnet will have millions of users. By the time most people arrive, the wall will be full. The early Nads who claimed their square will have something no amount of money can buy after the fact: **proof that they were here first.**
+The wall has 1,000 slots. Monad's ecosystem will have millions of users. By the time most people arrive, the wall will be full. The early Nads who claimed their square will have something no amount of money can buy after the fact: **proof that they were here first.**
 
 Every slot is a timestamp. Every image is an identity. Every note is a message to whoever reads the wall in 2030, or 2040, or whenever. The blockchain doesn't care. It just holds the data — forever.
 
