@@ -7,8 +7,9 @@ const ClientProviders = dynamic(() => import('@/app/providers').then((mod) => mo
 })
 
 export const metadata: Metadata = {
-  title: '1000nads',
+  title: '1000Nads — Be immortal on Monad. Forever.',
   description: 'Own one of 1000 permanent spots on Monad.',
+  icons: { icon: '/favicon.svg' },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

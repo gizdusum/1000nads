@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#0d001a"/>
+  <!-- Map pin shape: teardrop -->
+  <path d="M16 4C11.582 4 8 7.582 8 12c0 6.627 8 16 8 16s8-9.373 8-16c0-4.418-3.582-8-8-8z" fill="#8c6dff"/>
+  <!-- Inner circle -->
+  <circle cx="16" cy="12" r="3.5" fill="#0d001a"/>
+</svg>
