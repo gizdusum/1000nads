@@ -8,7 +8,7 @@ export const TOTAL_SLOTS     = 1000
 export const GRID_COLUMNS    = 40
 export const GRID_ROWS       = 25
 
-export type MegaBlock = { anchorId: number; colSpan: number; hiddenIds: number[] }
+export type MegaBlock = { anchorId: number; colSpan: number; rowSpan?: number; hiddenIds: number[] }
 
 export const MEGA_BLOCKS: MegaBlock[] = [
   { anchorId: 132, colSpan: 6, hiddenIds: [133, 134, 135, 136, 137] },
