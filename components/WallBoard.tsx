@@ -345,7 +345,7 @@ export function WallBoard() {
             }
           >
             {(isAnago || slot.imageUri)
-              ? <img src={isAnago ? '/143.png' : (slot.imageUri ?? '')} alt="" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
+              ? <img src={isAnago ? '/143.webp' : (slot.imageUri ?? '')} alt="" loading="lazy" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }} />
               : <span className="wall-slot__n">
                   {slot.id + 1}
                   {isMega && <span className="wall-slot__mega-tag">{colSpan}×</span>}
@@ -548,7 +548,7 @@ export function WallBoard() {
           <div className="inspect-backdrop" onClick={() => setInspectId(null)}>
             <div className="inspect-card" onClick={e => e.stopPropagation()}>
               <button className="inspect-close" onClick={() => setInspectId(null)}>✕</button>
-              <img src="/143.png" alt="Anago" className="inspect-img" style={{ objectFit: 'cover' }} />
+              <img src="/143.webp" alt="Anago" className="inspect-img" style={{ objectFit: 'cover' }} />
               <div className="inspect-body">
                 <div className="inspect-num">Anago 🐕</div>
                 <div className="inspect-note">"We love you, Anago. Keone's loyal companion — forever immortalized on Monad."</div>

@@ -15,7 +15,12 @@ export const MEGA_BLOCKS: MegaBlock[] = [
   { anchorId: 469, colSpan: 6, hiddenIds: [470, 471, 472, 473, 474] },
   { anchorId: 764, colSpan: 6, hiddenIds: [765, 766, 767, 768, 769] },
   { anchorId:  47, colSpan: 4, hiddenIds: [ 48,  49,  50] },
-  { anchorId: 142, colSpan: 4, hiddenIds: [143, 144, 145] }, // Anago reserved
+  { anchorId: 142, colSpan: 8, rowSpan: 4, hiddenIds: [
+    143, 144, 145, 146, 147, 148, 149,           // row 3 (cols 23-29)
+    182, 183, 184, 185, 186, 187, 188, 189,       // row 4 (cols 22-29)
+    222, 223, 224, 225, 226, 227, 228, 229,       // row 5 (cols 22-29)
+    262, 263, 264, 265, 266, 267, 268, 269,       // row 6 (cols 22-29)
+  ] }, // Anago — Monad's immortal mascot
   { anchorId: 231, colSpan: 4, hiddenIds: [232, 233, 234] },
   { anchorId: 248, colSpan: 4, hiddenIds: [249, 250, 251] },
   { anchorId: 337, colSpan: 4, hiddenIds: [338, 339, 340] },
